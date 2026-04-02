@@ -131,6 +131,23 @@ def calculate_overlaps_view(request):
         final_columns = [col for col in column_order if col in df.columns]
         df = df[final_columns]
 
+        # Visually group duplicates just like the frontend OverlapsModal
+        if "Plantation By (Department)" in df.columns and "Plantation ID" in df.columns:
+            # Create sort keys
+            df['sort_dept'] = df['Plantation By (Department)'].astype(str).str.strip().str.lower()
+            df['sort_id'] = df['Plantation ID'].astype(str).str.strip()
+            # Sort identically to frontend
+            df.sort_values(by=['sort_dept', 'sort_id'], inplace=True)
+            df.drop(columns=['sort_dept', 'sort_id'], inplace=True)
+            df.reset_index(drop=True, inplace=True)
+
+        if "Plantation ID" in df.columns:
+            is_dupe = df["Plantation ID"] == df["Plantation ID"].shift(1)
+            blankable_columns = ["Plantation ID", "Plantation By (Department)", "Plants Name", "No. of Plants", "Area (Text)", "Actual Area (hectares)", "Created At"]
+            for col in blankable_columns:
+                if col in df.columns:
+                    df.loc[is_dupe, col] = ""
+
         if fmt == 'xlsx':
             try:
                 import openpyxl

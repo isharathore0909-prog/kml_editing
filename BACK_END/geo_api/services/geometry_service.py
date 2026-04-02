@@ -3,6 +3,17 @@ from .base_service import BaseService
 from ..utils.geom_utils import update_feature_geometry
 
 class GeometryService(BaseService):
+    def _make_valid(self, geom):
+        """Robustly repairs invalid geometry across different Shapely versions."""
+        if not geom or geom.is_valid:
+            return geom
+        try:
+            from shapely.validation import make_valid
+            return make_valid(geom)
+        except ImportError:
+            # Fallback for older Shapely
+            return geom.buffer(0)
+    
     def update_vertex(self, feature, vertex_path, new_lng, new_lat):
         """Updates a vertex in a GeoJSON feature WITHOUT mutating the original."""
         try:
@@ -37,12 +48,27 @@ class GeometryService(BaseService):
             
             if not geoms: return None
             
-            # Use a slightly larger buffer (1e-6) to bridge precision gaps in real-world data
-            buffered_geoms = [g.buffer(1e-6) if g.is_valid else g.buffer(0).buffer(1e-6) for g in geoms]
-            merged_geom = unary_union(buffered_geoms)
+            # --- Robust Union Pipeline ---
+            # 1. Snap to grid / Round coordinates to remove infinitesimal gaps
+            def snap_geom(g):
+                if g.is_empty: return g
+                from shapely.wkt import loads, dumps
+                # Rounding to 7 decimal places (~1cm) helps Shapely find shared edges
+                return loads(dumps(g, rounding_precision=7))
+
+            geoms = [self._make_valid(snap_geom(g)) for g in geoms]
             
-            # Clean up the output by buffering back
-            merged_geom = merged_geom.buffer(-1e-6)
+            # 2. Direct union
+            merged_geom = unary_union(geoms)
+            
+            # 3. Aggressive "Healing" (Dilation-Erosion)
+            # We use a larger buffer and Mitre joins to bridge gaps without rounding corners too much.
+            # 1e-4 is approx 10 meters at the equator.
+            healing_dist = 1.5e-4 
+            merged_geom = merged_geom.buffer(healing_dist, join_style=2).buffer(-healing_dist, join_style=2)
+            
+            # 4. Final Cleanup
+            merged_geom = self._make_valid(merged_geom).simplify(1e-7)
             
             if merged_geom.is_empty: return None
             

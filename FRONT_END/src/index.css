@@ -160,6 +160,13 @@ h1 {
     flex: 1;
     position: relative;
     background: #f8fafc;
+    border: 1.5px solid var(--border-color);
+    border-radius: 16px;
+    margin: 12px;
+    margin-left: 0;
+    /* Align with sidebar */
+    overflow: hidden;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
 }
 
 #map {
@@ -170,6 +177,11 @@ h1 {
 .leaflet-container {
     background: #f8fafc !important;
     outline: none;
+}
+
+/* Hide Leaflet Attribution for a cleaner UI */
+.leaflet-control-attribution {
+    display: none !important;
 }
 
 .leaflet-tile-container img {

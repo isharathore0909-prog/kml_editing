@@ -2,19 +2,19 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { geoApi } from '../api/geoApi';
 import { mutateGeometry } from '../utils/geoUtils';
 
-export const useGeoHistory = (fileName, setGeoJsonData, { incrementMapVersion } = {}) => {
+export const useGeoHistory = (sessionId, setGeoJsonData, { incrementMapVersion } = {}) => {
     const [canUndo, setCanUndo] = useState(false);
     const [canRedo, setCanRedo] = useState(false);
     const vertexAbortRef = useRef(null);
 
-    // Sync undo/redo status from the server whenever the active file changes.
+    // Sync undo/redo status from the server whenever the active session changes.
     useEffect(() => {
-        if (!fileName) {
+        if (!sessionId) {
             setCanUndo(false);
             setCanRedo(false);
             return;
         }
-        geoApi.getHistoryStatus(fileName)
+        geoApi.getHistoryStatus(sessionId)
             .then(res => {
                 setCanUndo(res.can_undo ?? false);
                 setCanRedo(res.can_redo ?? false);
@@ -23,7 +23,7 @@ export const useGeoHistory = (fileName, setGeoJsonData, { incrementMapVersion } 
                 setCanUndo(false);
                 setCanRedo(false);
             });
-    }, [fileName]);
+    }, [sessionId]);
 
     const updateHistoryStatus = useCallback((res) => {
         if (!res) return;
@@ -76,7 +76,7 @@ export const useGeoHistory = (fileName, setGeoJsonData, { incrementMapVersion } 
             vertexAbortRef.current = null;
         }
         try {
-            const res = await geoApi.undoHistory(fileName);
+            const res = await geoApi.undoHistory(sessionId);
             if (res.action) {
                 applyDelta(res.action);
                 updateHistoryStatus(res);
@@ -84,7 +84,7 @@ export const useGeoHistory = (fileName, setGeoJsonData, { incrementMapVersion } 
         } catch (e) {
             console.warn("No more undo history");
         }
-    }, [fileName, applyDelta, updateHistoryStatus]);
+    }, [sessionId, applyDelta, updateHistoryStatus]);
 
     const redo = useCallback(async () => {
         if (vertexAbortRef.current) {
@@ -92,7 +92,7 @@ export const useGeoHistory = (fileName, setGeoJsonData, { incrementMapVersion } 
             vertexAbortRef.current = null;
         }
         try {
-            const res = await geoApi.redoHistory(fileName);
+            const res = await geoApi.redoHistory(sessionId);
             if (res.action) {
                 applyDelta(res.action);
                 updateHistoryStatus(res);
@@ -100,7 +100,7 @@ export const useGeoHistory = (fileName, setGeoJsonData, { incrementMapVersion } 
         } catch (e) {
             console.warn("No more redo history");
         }
-    }, [fileName, applyDelta, updateHistoryStatus]);
+    }, [sessionId, applyDelta, updateHistoryStatus]);
 
     return {
         canUndo,

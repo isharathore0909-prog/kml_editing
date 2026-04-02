@@ -136,4 +136,5 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 524288000
 # Also increase the maximum number of GET/POST parameters if needed for multi-feature data
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 50000
 
-
+# Data chunk storage retention (in days)
+CHUNK_STORAGE_RETENTION_DAYS = 1

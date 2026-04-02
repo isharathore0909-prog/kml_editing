@@ -78,26 +78,26 @@ class HistoryService(BaseService):
             }
 
     def undo(self, session_id):
-        """Returns a list of actions to REVERSE the last thing done."""
+        """Returns (formatted_list, raw_action) to REVERSE the last thing done."""
         if not session_id or session_id not in self._sessions or not self._sessions[session_id]['undo']:
-            return None
+            return None, None
             
         session = self._sessions[session_id]
         action = session['undo'].pop()
         session['redo'].append(action)
         
-        return self._format_action(action, is_undo=True)
+        return self._format_action(action, is_undo=True), action
 
     def redo(self, session_id):
-        """Returns a list of actions to RE-APPLY the last undone thing."""
+        """Returns (formatted_list, raw_action) to RE-APPLY the last undone thing."""
         if not session_id or session_id not in self._sessions or not self._sessions[session_id]['redo']:
-            return None
+            return None, None
             
         session = self._sessions[session_id]
         action = session['redo'].pop()
         session['undo'].append(action)
         
-        return self._format_action(action, is_undo=False)
+        return self._format_action(action, is_undo=False), action
 
     def get_status(self, session_id):
         if session_id not in self._sessions:

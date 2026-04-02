@@ -135,8 +135,8 @@ export const geoApi = {
             },
         }),
 
-    exportLayer: (geoJsonData, format, filename) =>
-        request(`${API_ENDPOINTS.EXPORT_LAYER}?format=${format}&filename=${filename}`, {
+    exportLayer: (geoJsonData, format, filename, sessionId = 'default') =>
+        request(`${API_ENDPOINTS.EXPORT_LAYER}?format=${format}&filename=${filename}&session_id=${encodeURIComponent(sessionId)}`, {
             method: 'POST',
             json: geoJsonData,
             asBlob: true,

@@ -42,11 +42,22 @@ class ExportService(BaseService):
         except: pass
         return geom
 
-    def export_features(self, data, fmt, filename):
+    def export_features(self, data, fmt, filename, session_id=None):
         """Main entry point for exporting features."""
         fmt = fmt.lower()
         clean_name = "".join([c for c in filename if c.isalnum() or c in (' ', '.', '_', '-')]).strip()
         if not clean_name: clean_name = "exported_geodata"
+
+        # Tiling Support: If session_id provided and it's tiled, load from chunks
+        from .tiling_service import TilingService
+        ts = TilingService()
+        if session_id and ts.is_tiled(session_id):
+            print(f"[*] Exporting from tiled session chunks: {session_id}")
+            result = ts.get_features_in_bbox(session_id, [-180, -90, 180, 90])
+            if result and result.get('features'):
+                data = {'type': 'FeatureCollection', 'features': result['features']}
+            else:
+                return JsonResponse({'error': 'Tiled session contains no features'}, status=400)
 
         if fmt == 'geojson':
             res = HttpResponse(json.dumps(data), content_type='application/json')

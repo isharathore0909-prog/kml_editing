@@ -9,6 +9,7 @@ export function GeoDataProvider({ children }) {
     const [geoJsonData, setGeoJsonData] = useState(null);
     const [originalData, setOriginalData] = useState(null);
     const [fileName, setFileName] = useState('');
+    const [sessionId, setSessionId] = useState('');
     const [rawFile, setRawFile] = useState(null);
 
     // ── UI / status state ──────────────────────────────────────────────────
@@ -36,7 +37,7 @@ export function GeoDataProvider({ children }) {
     const workerRef = useRef(null);
 
     // Wire up the geo-operations hook
-    const geoOps = useGeoOperations(geoJsonData, setGeoJsonData, fileName, {
+    const geoOps = useGeoOperations(geoJsonData, setGeoJsonData, sessionId, {
         setOverlappedFeatures,
         setOverlapCount,
         setInvolvedCount,
@@ -73,7 +74,7 @@ export function GeoDataProvider({ children }) {
                 setGeoJsonBounds(bounds ?? null);
                 // Only accept pre-computed overlap data if it's the richer server version
                 setOverlappedFeatures(prev =>
-                    (prev?.length > 0 && prev[0]['Overlap Area (sqm)']) ? prev : (oFeats || [])
+                    (prev?.length > 0 && (prev[0]['Overlap Area (sqm)'] || prev[0]['Overlap Area (Hectares)'])) ? prev : (oFeats || [])
                 );
                 setOverlapCount(prev => prev ?? oCount ?? null);
                 setInvolvedCount(prev => prev ?? iCount ?? null);
@@ -97,6 +98,13 @@ export function GeoDataProvider({ children }) {
         setRawFile(file);
         setIsLoading(true);
         setFileName(file.name);
+
+        // Use filename + timestamp to ensure a novel session and NO auto-saving of old edits
+        const val = file.name.replace(/\.[^/.]+$/, '').toLowerCase();
+        const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\./g, '-');
+        const newSessionId = `${val}_${timestamp}`;
+        setSessionId(newSessionId);
+
         setGeoJsonData(null);
         setGeoJsonBounds(null);
         setOverlapCount(null);
@@ -107,8 +115,8 @@ export function GeoDataProvider({ children }) {
             setLoadingMessage('Large file detected. Streaming from server...');
             setCoordinateStatus({ type: 'INFO', message: 'Tiled mode: Streaming from server' });
 
-            // Await the server-side tiling and overlap calculation (skipping overlaps initially)
-            geoOps.calculateOverlaps(file, file.name, true).finally(() => {
+            // Use the NEW unique session ID
+            geoOps.calculateOverlaps(file, newSessionId, true).finally(() => {
                 setIsLoading(false);
             });
         } else {
@@ -187,21 +195,46 @@ export function GeoDataProvider({ children }) {
         // Refs
         fileInputRef,
         // Actions
+        geoJsonData,
+        geoJsonBounds,
+        fileName,
+        isLoading,
+        loadingMessage,
+        coordinateStatus,
+        overlapCount,
+        involvedCount,
+        overlappedFeatures,
+        mapVersion,
+        isTiled,
+        toolMode,
+        editingFeatureId,
+        mergeSelection,
+        // Actions
         processFile,
         handleFileUpload,
         toggleManualSwap,
         resetToOriginal,
         clearData,
-        // Geo operations (spread last so they can be overridden if needed)
-        ...geoOps,
+        // Geo operations
+        calculateOverlaps: geoOps.calculateOverlaps,
+        downloadExcel: geoOps.downloadExcel,
+        updateLocalVertex: geoOps.updateLocalVertex,
+        updateFeatureVertex: geoOps.updateFeatureVertex,
+        deleteFeature: geoOps.deleteFeature,
+        mergeFeatures: geoOps.mergeFeatures,
+        autoMergeAllOverlaps: geoOps.autoMergeAllOverlaps,
+        exportLayer: geoOps.exportLayer,
+        undo: geoOps.undo, redo: geoOps.redo, canUndo: geoOps.canUndo, canRedo: geoOps.canRedo,
+        sessionId,
     }), [
-        geoJsonData, originalData, fileName, rawFile,
-        isDragging, coordinateStatus, isLoading, loadingMessage,
-        geoJsonBounds, overlapCount, involvedCount, overlappedFeatures,
-        mapVersion, isTiled,
-        toolMode, editingFeatureId, mergeSelection,
-        processFile, handleFileUpload, toggleManualSwap, resetToOriginal, clearData,
-        geoOps,
+        geoJsonData, geoJsonBounds, fileName, isLoading, loadingMessage,
+        coordinateStatus, overlapCount, involvedCount, overlappedFeatures,
+        toolMode, editingFeatureId, mergeSelection, isTiled, mapVersion,
+        geoOps.calculateOverlaps, geoOps.downloadExcel, geoOps.updateLocalVertex,
+        geoOps.updateFeatureVertex, geoOps.deleteFeature, geoOps.mergeFeatures,
+        geoOps.autoMergeAllOverlaps, geoOps.exportLayer,
+        geoOps.undo, geoOps.redo, geoOps.canUndo, geoOps.canRedo,
+        sessionId
     ]);
 
     return <GeoDataContext.Provider value={value}>{children}</GeoDataContext.Provider>;
