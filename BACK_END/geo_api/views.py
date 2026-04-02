@@ -1,0 +1,419 @@
+import json
+import tempfile
+from django.http import HttpResponse, JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+
+from .services.overlap_service import OverlapService
+from .services.export_service import ExportService
+from .services.geometry_service import GeometryService
+
+from .services.history_service import HistoryService
+from .services.tiling_service import TilingService
+
+# Instantiate services
+overlap_service = OverlapService()
+export_service = ExportService()
+geometry_service = GeometryService()
+import re
+history_service = HistoryService()
+tiling_service = TilingService()
+
+def _get_session_id(request):
+    """Sanitize and normalize session_id for Windows filesystem consistency."""
+    val = request.POST.get('session_id') or request.GET.get('session_id')
+    if not val and request.content_type == 'application/json':
+        try:
+            val = json.loads(request.body).get('session_id')
+        except: pass
+    
+    return (val or 'default').lower().replace(' ', '_').replace(':', '_')
+
+def _get_feature_id(feature):
+    if not feature: return None
+    return (feature.get('_id') or feature.get('id') or 
+            feature.get('properties', {}).get('_id') or 
+            feature.get('properties', {}).get('id'))
+    # Replace all non-alphanumeric (except . and _) with a single dash
+    normalized = re.sub(r'[^a-z0-9._]+', '-', val).strip('-')
+    return normalized or 'default'
+
+@csrf_exempt
+def calculate_overlaps_view(request):
+    """
+    Handles file upload and overlap calculation using OverlapService.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+
+    if 'file' not in request.FILES:
+        return JsonResponse({'error': 'No file uploaded'}, status=400)
+
+    uploaded_file = request.FILES['file']
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.kmz')
+    tmp_path = tmp.name
+    
+    try:
+        for chunk in uploaded_file.chunks():
+            tmp.write(chunk)
+        tmp.close()  # Close for Windows compatibility
+        
+        # Sanitize session_id for Windows filesystem (remove :, *, ?, etc.)
+        session_id = _get_session_id(request)
+        
+        print(f"[*] Processing file: {uploaded_file.name} ({uploaded_file.size} bytes)")
+        
+        # 1. Tiling (Skip if already tiled for this session)
+        if not tiling_service.is_tiled(session_id):
+            print(f"[*] Tiling started for session {session_id}...")
+            tiling_service.process_large_file(tmp_path, session_id)
+            print(f"[*] Tiling completed.")
+        else:
+            print(f"[*] Session {session_id} already tiled. Skipping tiling step.")
+        
+        # 2. Overlap Calculation
+        skip_overlaps = request.GET.get('skip_overlaps') == 'true'
+        
+        if not skip_overlaps:
+            print(f"[*] Overlap calculation started...")
+            df, involved_count = overlap_service.calculate_overlaps(tmp_path, session_id=session_id)
+            print(f"[*] Overlap calculation finished. Found {len(df) if df is not None else 0} overlaps.")
+        else:
+            print(f"[*] Skipping overlap calculation as requested.")
+            df = None
+            involved_count = None
+
+        is_large = tiling_service.is_tiled(session_id)
+        
+        if not skip_overlaps and df is None:
+            return JsonResponse({'error': 'Processing failed to yield data'}, status=400)
+            
+        fmt = request.GET.get('format', 'csv')
+        filename = f"overlaps_{uploaded_file.name}"
+
+        if fmt == 'json':
+            response_data = {
+                'isTiled': bool(is_large),
+                'bounds': overlap_service.get_total_bounds(tmp_path)
+            }
+            if not skip_overlaps and df is not None:
+                response_data.update({
+                    'overlapCount': len(df),
+                    'involvedCount': involved_count,
+                    'pairs': df.to_dict(orient='records')
+                })
+            else:
+                response_data.update({
+                    'overlapCount': None,
+                    'involvedCount': None,
+                    'pairs': []
+                })
+            return JsonResponse(response_data)
+
+        if skip_overlaps:
+             return JsonResponse({'message': 'Tiling completed, overlaps skipped', 'isTiled': True})
+
+        if df.empty:
+            return JsonResponse({
+                'message': 'No overlaps found in this dataset', 
+                'pairs': [], 
+                'isTiled': bool(is_large)
+            })
+
+        # Columns formatting
+        column_order = [
+            "Plantation ID", "Plantation By (Department)", "Plants Name", "No. of Plants", 
+            "Area (Text)", "Actual Area (hectares)", "Created At",
+            "Overlapping Plantation ID", "Overlapping Plantation By", 
+            "Overlapping Plants Name", "Overlapping No. of Plants",
+            "Overlapping Area (Text)", "Overlapping Actual Area (hectares)",
+            "Overlapping Created At", "Overlap Area (Hectares)"
+        ]
+        final_columns = [col for col in column_order if col in df.columns]
+        df = df[final_columns]
+
+        if fmt == 'xlsx':
+            try:
+                import openpyxl
+                response = HttpResponse(content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+                response['Content-Disposition'] = f'attachment; filename="{filename}.xlsx"'
+                df.to_excel(response, index=False)
+                return response
+            except ImportError:
+                return JsonResponse({'error': 'Excel export requires openpyxl library'}, status=501)
+
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = f'attachment; filename="{filename}.csv"'
+        df.to_csv(response, index=False, encoding='utf-8-sig')
+        return response
+
+    except Exception as e:
+        return JsonResponse({'error': f'Server error: {str(e)}'}, status=500)
+    finally:
+        overlap_service.cleanup_tmp(tmp_path)
+
+@csrf_exempt
+def vector_operation(request):
+    """
+    Handles vector data operations using GeometryService.
+    """
+    if request.method != 'POST': 
+        return JsonResponse({'error': 'POST required'}, status=405)
+    try:
+        data = json.loads(request.body)
+        op = data.get('operation')
+        features = data.get('features', [])
+        session_id = _get_session_id(request)
+        
+        if op == 'update_vertex' and features:
+            old_feature = features[0]
+            updated = geometry_service.update_vertex(
+                old_feature, data.get('vertex_path', {}), 
+                data.get('new_lng'), data.get('new_lat')
+            )
+            feature_id = _get_feature_id(updated)
+            history_service.push_action(session_id, 'update', feature_id, old_feature, updated)
+            
+            # Sync with disk chunks if tiled
+            if tiling_service.is_tiled(session_id):
+                tiling_service.update_feature_in_chunks(session_id, old_feature, updated)
+                
+            return JsonResponse({'features': [updated], **history_service.get_status(session_id)})
+            
+        if op == 'delete_feature' and features:
+            feature_to_delete = features[0]
+            feature_id = _get_feature_id(feature_to_delete)
+            history_service.push_action(session_id, 'delete', feature_id, old_data=feature_to_delete)
+            
+            # Sync with disk chunks if tiled
+            if tiling_service.is_tiled(session_id):
+                tiling_service.delete_feature_from_chunks(session_id, feature_to_delete)
+                
+            return JsonResponse({'status': 'ok', **history_service.get_status(session_id)})
+
+        if op == 'merge_features' and len(features) >= 2:
+            merged_feature = geometry_service.merge_features(features)
+            if not merged_feature:
+                return JsonResponse({'error': 'Merging failed to produce a valid result.'}, status=400)
+            
+            # Record a composite action: delete others, update the first one
+            composite = []
+            primary = features[0]
+            primary_id = _get_feature_id(primary)
+            
+            composite.append({
+                'type': 'update',
+                'feature_id': primary_id,
+                'old_data': primary,
+                'new_data': merged_feature
+            })
+            # 2. Others are deleted
+            for other in features[1:]:
+                composite.append({
+                    'type': 'delete',
+                    'feature_id': _get_feature_id(other),
+                    'old_data': other,
+                    'new_data': None
+                })
+            
+            history_service.push_action(session_id, None, None, composite=composite)
+            
+            # Sync with disk chunks if tiled
+            if tiling_service.is_tiled(session_id):
+                # 1. Update the primary feature with the merged geometry
+                tiling_service.update_feature_in_chunks(session_id, primary, merged_feature)
+                
+                # 2. Delete the other features, but ONLY if they have different IDs than the primary!
+                # If they have the same ID, they were already 'updated' by the call above.
+                for other in features[1:]:
+                    other_id = _get_feature_id(other)
+                    if str(other_id) != str(primary_id):
+                        tiling_service.delete_feature_from_chunks(session_id, other)
+
+            return JsonResponse({
+                'merged_feature': merged_feature,
+                'deleted_ids': [
+                    (f.get('_id') or f.get('id') or f.get('properties', {}).get('_id') or f.get('properties', {}).get('id'))
+                    for f in features[1:]
+                ],
+                **history_service.get_status(session_id)
+            })
+
+        return JsonResponse({'error': f'Unsupported op: {op}'}, status=400)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({'error': str(e)}, status=500)
+
+@csrf_exempt
+def export_layer(request):
+    """
+    Exports GeoJSON features using ExportService.
+    """
+    if request.method != 'POST': 
+        return JsonResponse({'error': 'POST required'}, status=405)
+    
+    try:
+        data = json.loads(request.body)
+        fmt = request.GET.get('format', 'geojson')
+        name = request.GET.get('filename', 'exported')
+        
+        return export_service.export_features(data, fmt, name)
+        
+    except Exception as e:
+        return JsonResponse({'error': f"Export failed: {str(e)}"}, status=500)
+
+@csrf_exempt
+def history_push(request):
+    """Records a manual action into history."""
+    if request.method != 'POST': return JsonResponse({'error': 'POST required'}, status=405)
+    try:
+        session_id = _get_session_id(request)
+        data = json.loads(request.body)
+        
+        history_service.push_action(
+            session_id,
+            data.get('action_type'),
+            data.get('feature_id'),
+            data.get('old_data'),
+            data.get('new_data')
+        )
+        return JsonResponse({
+            'status': 'ok', 
+            **history_service.get_status(session_id)
+        })
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@csrf_exempt
+def history_undo(request):
+    session_id = _get_session_id(request)
+    action = history_service.undo(session_id)
+    if action:
+        return JsonResponse({
+            'status': 'ok', 
+            'action': action,
+            **history_service.get_status(session_id)
+        })
+    return JsonResponse({'status': 'error', 'message': 'No more undo history'}, status=404)
+
+@csrf_exempt
+def history_redo(request):
+    session_id = _get_session_id(request)
+    action = history_service.redo(session_id)
+    if action:
+        return JsonResponse({
+            'status': 'ok', 
+            'action': action,
+            **history_service.get_status(session_id)
+        })
+    return JsonResponse({'status': 'error', 'message': 'No more redo history'}, status=404)
+
+@csrf_exempt
+def history_status(request):
+    """Returns the current undo/redo availability for a session (read-only, no mutation)."""
+    session_id = _get_session_id(request)
+    return JsonResponse(history_service.get_status(session_id))
+
+@csrf_exempt
+def record_vertex_edit(request):
+    """
+    Lightweight endpoint: records a vertex edit using minimal delta.
+    Expects JSON body:
+      session_id, feature_id, vertex_path, old_pos, new_pos
+      (pos is [lng, lat])
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    try:
+        session_id = _get_session_id(request)
+        body = json.loads(request.body)
+        feature_id = body.get('feature_id')
+        vertex_path = body.get('vertex_path')
+        old_pos = body.get('old_pos')
+        new_pos = body.get('new_pos')
+
+        if not feature_id or not vertex_path:
+            return JsonResponse({'error': 'feature_id and vertex_path required'}, status=400)
+
+        history_service.push_action(
+            session_id, 'update', feature_id, 
+            vertex_delta={'path': vertex_path, 'old_pos': old_pos, 'new_pos': new_pos}
+        )
+        
+        # Sync with disk chunks if tiled
+        if tiling_service.is_tiled(session_id):
+            # Use both old and new positions to define search area, with a small buffer
+            search_pts = [new_pos]
+            if old_pos: search_pts.append(old_pos)
+            
+            lons = [p[0] for p in search_pts]
+            lats = [p[1] for p in search_pts]
+            
+            # Add 0.001 degree buffer (~100m) for safety
+            bbox = [min(lons) - 0.001, min(lats) - 0.001, 
+                    max(lons) + 0.001, max(lats) + 0.001]
+            result = tiling_service.get_features_in_bbox(session_id, bbox)
+            features = result.get('features', []) if result else None
+            if features:
+                target = next((f for f in features if (f.get('_id') or f.get('id') or f.get('properties', {}).get('_id') or f.get('properties', {}).get('id')) == feature_id), None)
+                if target:
+                    from .services.geometry_service import GeometryService
+                    gs = GeometryService()
+                    updated = gs.update_vertex(target, vertex_path, new_pos[0], new_pos[1])
+                    tiling_service.update_feature_in_chunks(session_id, target, updated)
+
+        return JsonResponse({'status': 'ok', **history_service.get_status(session_id)})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@csrf_exempt
+def record_deletion(request):
+    """
+    Lightweight endpoint: records a feature deletion in history.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    try:
+        body = json.loads(request.body)
+        session_id = body.get('session_id', 'default')
+        feature = body.get('feature')
+        
+        if not feature or not feature.get('_id'):
+            return JsonResponse({'error': 'Feature with _id required'}, status=400)
+
+        history_service.push_action(session_id, 'delete', feature.get('_id'), old_data=feature)
+        
+        # Sync with disk chunks if tiled
+        if tiling_service.is_tiled(session_id):
+            tiling_service.delete_feature_from_chunks(session_id, feature)
+            
+        return JsonResponse({'status': 'ok', **history_service.get_status(session_id)})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@csrf_exempt
+def get_bbox_features(request):
+    """
+    Returns features within a specific BBox from tiled chunks.
+    Expects GET params: session_id, bbox (csv: minx,miny,maxx,maxy)
+    """
+    session_id = _get_session_id(request)
+    bbox_str = request.GET.get('bbox')
+    
+    print(f"[DEBUG] get_bbox_features: session={session_id}, bbox={bbox_str}")
+    
+    if not session_id or not bbox_str:
+        return JsonResponse({'error': 'session_id and bbox required'}, status=400)
+    
+    try:
+        parts = [float(x) for x in bbox_str.split(',')]
+        if len(parts) != 4: raise ValueError("BBox must be 4 floats")
+        
+        result = tiling_service.get_features_in_bbox(session_id, parts)
+        if result is None:
+            return JsonResponse({'error': 'Not tiled'}, status=404)
+            
+        print(f"[DEBUG] Found {result.get('count', 0)} features in bbox (limited={result.get('limited', False)})")
+        return JsonResponse(result)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
