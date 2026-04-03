@@ -171,50 +171,33 @@ export function GeoDataProvider({ children }) {
 
     // ── Memoized context value — only changes when relevant state changes ──
     const value = useMemo(() => ({
-        // Data
+        // State
         geoJsonData, setGeoJsonData,
-        originalData,
         fileName, setFileName,
+        sessionId, setSessionId,
         rawFile, setRawFile,
-        // UI
         isDragging, setIsDragging,
         coordinateStatus, setCoordinateStatus,
         isLoading, setIsLoading,
         loadingMessage, setLoadingMessage,
-        // Geo results
         geoJsonBounds, setGeoJsonBounds,
         overlapCount, setOverlapCount,
         involvedCount, setInvolvedCount,
         overlappedFeatures, setOverlappedFeatures,
         mapVersion, incrementMapVersion,
         isTiled, setIsTiled,
-        // Tool mode
         toolMode, setToolMode,
         editingFeatureId, setEditingFeatureId,
         mergeSelection, setMergeSelection,
-        // Refs
         fileInputRef,
-        // Actions
-        geoJsonData,
-        geoJsonBounds,
-        fileName,
-        isLoading,
-        loadingMessage,
-        coordinateStatus,
-        overlapCount,
-        involvedCount,
-        overlappedFeatures,
-        mapVersion,
-        isTiled,
-        toolMode,
-        editingFeatureId,
-        mergeSelection,
+
         // Actions
         processFile,
         handleFileUpload,
         toggleManualSwap,
         resetToOriginal,
         clearData,
+
         // Geo operations
         calculateOverlaps: geoOps.calculateOverlaps,
         downloadExcel: geoOps.downloadExcel,
@@ -225,16 +208,12 @@ export function GeoDataProvider({ children }) {
         autoMergeAllOverlaps: geoOps.autoMergeAllOverlaps,
         exportLayer: geoOps.exportLayer,
         undo: geoOps.undo, redo: geoOps.redo, canUndo: geoOps.canUndo, canRedo: geoOps.canRedo,
-        sessionId,
     }), [
-        geoJsonData, geoJsonBounds, fileName, isLoading, loadingMessage,
-        coordinateStatus, overlapCount, involvedCount, overlappedFeatures,
-        toolMode, editingFeatureId, mergeSelection, isTiled, mapVersion,
-        geoOps.calculateOverlaps, geoOps.downloadExcel, geoOps.updateLocalVertex,
-        geoOps.updateFeatureVertex, geoOps.deleteFeature, geoOps.mergeFeatures,
-        geoOps.autoMergeAllOverlaps, geoOps.exportLayer,
-        geoOps.undo, geoOps.redo, geoOps.canUndo, geoOps.canRedo,
-        sessionId
+        geoJsonData, geoJsonBounds, fileName, sessionId, rawFile, isDragging,
+        coordinateStatus, isLoading, loadingMessage, overlapCount, involvedCount, overlappedFeatures,
+        mapVersion, isTiled, toolMode, editingFeatureId, mergeSelection,
+        processFile, handleFileUpload, toggleManualSwap, resetToOriginal, clearData,
+        geoOps, incrementMapVersion
     ]);
 
     return <GeoDataContext.Provider value={value}>{children}</GeoDataContext.Provider>;

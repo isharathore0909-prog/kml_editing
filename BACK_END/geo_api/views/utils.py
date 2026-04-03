@@ -22,13 +22,13 @@ def _get_session_id(request):
             val = json.loads(request.body).get('session_id')
         except: pass
     
-    return (val or 'default').lower().replace(' ', '_').replace(':', '_')
+    val = (val or 'default').lower()
+    # Replace all non-alphanumeric (except . and _) with a single dash
+    normalized = re.sub(r'[^a-z0-9._]+', '-', val).strip('-')
+    return normalized or 'default'
 
 def _get_feature_id(feature):
     if not feature: return None
     return (feature.get('_id') or feature.get('id') or 
             feature.get('properties', {}).get('_id') or 
             feature.get('properties', {}).get('id'))
-    # Replace all non-alphanumeric (except . and _) with a single dash
-    normalized = re.sub(r'[^a-z0-9._]+', '-', val).strip('-')
-    return normalized or 'default'

@@ -106,6 +106,7 @@ export function MapViewer() {
                             isTiled={isTiled} sessionId={sessionId}
                             geoJsonData={geoJsonData} setGeoJsonData={setGeoJsonData}
                             setIsTiledLoading={setIsTiledLoading}
+                            mapVersion={mapVersion}
                         />
                         <MapController />
                         <VertexMarkers bulkLayerRefs={layerRefs} />

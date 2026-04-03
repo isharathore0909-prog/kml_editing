@@ -2,7 +2,7 @@ import json
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
-from .utils import _get_session_id, history_service, tiling_service, geometry_service
+from .utils import _get_session_id, history_service, tiling_service, overlap_service
 
 @csrf_exempt
 def history_push(request):
@@ -29,19 +29,18 @@ def history_push(request):
 @csrf_exempt
 def history_undo(request):
     session_id = _get_session_id(request)
-    formatted_actions, raw_action = history_service.undo(session_id)
-    if formatted_actions:
-        # Side effect: Sync with disk chunks if tiled
+    formatted, raw = history_service.undo(session_id)
+    if formatted:
+        # Sync with disk chunks if tiled
         if tiling_service.is_tiled(session_id):
-            _sync_history_action_to_chunks(session_id, raw_action, is_undo=True)
+            _sync_history_action_to_chunks(session_id, raw, is_undo=True)
         
-        # Invalidate overlap cache - any history action changes geometry/structure
-        from .utils import overlap_service
+        # Invalidate overlap cache
         overlap_service.invalidate_cache(session_id)
             
         return JsonResponse({
             'status': 'ok', 
-            'action': formatted_actions,
+            'action': formatted,
             **history_service.get_status(session_id)
         })
     return JsonResponse({'status': 'error', 'message': 'No more undo history'}, status=404)
@@ -49,74 +48,63 @@ def history_undo(request):
 @csrf_exempt
 def history_redo(request):
     session_id = _get_session_id(request)
-    formatted_actions, raw_action = history_service.redo(session_id)
-    if formatted_actions:
-        # Side effect: Sync with disk chunks if tiled
+    formatted, raw = history_service.redo(session_id)
+    if formatted:
+        # Sync with disk chunks if tiled
         if tiling_service.is_tiled(session_id):
-            _sync_history_action_to_chunks(session_id, raw_action, is_undo=False)
-            
+            _sync_history_action_to_chunks(session_id, raw, is_undo=False)
+        
         # Invalidate overlap cache
-        from .utils import overlap_service
         overlap_service.invalidate_cache(session_id)
             
         return JsonResponse({
             'status': 'ok', 
-            'action': formatted_actions,
+            'action': formatted,
             **history_service.get_status(session_id)
         })
     return JsonResponse({'status': 'error', 'message': 'No more redo history'}, status=404)
 
-def _sync_history_action_to_chunks(session_id, raw_action, is_undo=True):
-    """
-    Synchronizes a history action back to disk chunks.
-    Ensures undo/redo survives map refreshes in tiled sessions.
-    """
-    if 'composite' in raw_action:
-        # For composite, we must process in REVERSE order if undoing
-        actions = raw_action['composite']
-        if is_undo:
-            actions = reversed(actions)
-        for sub in actions:
-            _sync_history_action_to_chunks(session_id, sub, is_undo)
+def _sync_history_action_to_chunks(session_id, action, is_undo=False):
+    """Propagates a history action back to the disk-based tiled storage."""
+    # Handle composite actions (like Merges)
+    if 'composite' in action:
+        for sub in action['composite']:
+            _sync_history_action_to_chunks(session_id, sub, is_undo=is_undo)
         return
 
-    atype = raw_action.get('type')
-    fid = raw_action.get('feature_id')
-    old_data = raw_action.get('old_data')
-    new_data = raw_action.get('new_data')
-    v_delta = raw_action.get('vertex_delta')
+    a_type = action.get('type') or action.get('action_type')
+    f_id = action.get('feature_id')
+    old_data = action.get('old_data')
+    new_data = action.get('new_data')
+    v_delta = action.get('vertex_delta')
 
-    if v_delta:
-        # Vertex edit sync
-        target_pos = v_delta['old_pos'] if is_undo else v_delta['new_pos']
-        # Find feature in chunks to apply vertex update
-        bbox = [target_pos[0] - 0.001, target_pos[1] - 0.001, 
-                target_pos[0] + 0.001, target_pos[1] + 0.001]
-        result = tiling_service.get_features_in_bbox(session_id, bbox)
-        features = result.get('features', []) if result else []
-        target = next((f for f in features if (f.get('_id') or f.get('id') or f.get('properties', {}).get('_id') or f.get('properties', {}).get('id')) == fid), None)
+    # Undo: swap new and old
+    if is_undo:
+        old_data, new_data = new_data, old_data
+        if v_delta:
+            # Swap positions in delta
+            v_delta = v_delta.copy()
+            v_delta['old_pos'], v_delta['new_pos'] = v_delta['new_pos'], v_delta['old_pos']
+
+    # 1. Update/Restore
+    if a_type == 'update':
+        tiling_service.update_feature_in_chunks(session_id, old_data, new_data)
+    elif a_type == 'delete':
+        if is_undo: # restored
+            tiling_service.update_feature_in_chunks(session_id, None, new_data)
+        else: # deleted
+            tiling_service.delete_feature_from_chunks(session_id, old_data)
+    elif a_type == 'vertex' and v_delta:
+        # For tiled vertex edits, we need to find the feature in chunks first
+        # We'll use the new position to find the correct chunk cell
+        res = tiling_service.get_features_in_bbox(session_id, [v_delta['new_pos'][0]-0.001, v_delta['new_pos'][1]-0.001, v_delta['new_pos'][0]+0.001, v_delta['new_pos'][1]+0.001])
+        feats = res.get('features', []) if res else []
+        target = next((f for f in feats if (f.get('_id') or f.get('id')) == f_id), None)
         if target:
-            updated_geom = geometry_service.update_vertex(target, v_delta['path'], target_pos[0], target_pos[1])
-            new_feat = {**target, 'geometry': updated_geom}
-            tiling_service.update_feature_in_chunks(session_id, target, new_feat)
-
-    elif atype == 'add':
-        if is_undo:
-            if new_data: tiling_service.delete_feature_from_chunks(session_id, new_data)
-        else:
-            if new_data: tiling_service.update_feature_in_chunks(session_id, None, new_data)
-
-    elif atype == 'delete':
-        if is_undo:
-            if old_data: tiling_service.update_feature_in_chunks(session_id, None, old_data)
-        else:
-            if old_data: tiling_service.delete_feature_from_chunks(session_id, old_data)
-
-    elif atype == 'update':
-        if is_undo:
-            if old_data and new_data: tiling_service.update_feature_in_chunks(session_id, new_data, old_data)
-        else:
-            if old_data and new_data: tiling_service.update_feature_in_chunks(session_id, old_data, new_data)
+            from ..services.geometry_service import GeometryService
+            gs = GeometryService()
+            updated = gs.update_vertex(target, v_delta['path'], v_delta['new_pos'][0], v_delta['new_pos'][1])
+            tiling_service.update_feature_in_chunks(session_id, target, updated)
 
 @csrf_exempt
 def history_status(request):
@@ -171,10 +159,6 @@ def record_vertex_edit(request):
                     gs = GeometryService()
                     updated = gs.update_vertex(target, vertex_path, new_pos[0], new_pos[1])
                     tiling_service.update_feature_in_chunks(session_id, target, updated)
-        
-        # Invalidate overlap cache
-        from .utils import overlap_service
-        overlap_service.invalidate_cache(session_id)
 
         return JsonResponse({'status': 'ok', **history_service.get_status(session_id)})
     except Exception as e:
@@ -200,10 +184,6 @@ def record_deletion(request):
         # Sync with disk chunks if tiled
         if tiling_service.is_tiled(session_id):
             tiling_service.delete_feature_from_chunks(session_id, feature)
-            
-        # Invalidate overlap cache
-        from .utils import overlap_service
-        overlap_service.invalidate_cache(session_id)
             
         return JsonResponse({'status': 'ok', **history_service.get_status(session_id)})
     except Exception as e:
